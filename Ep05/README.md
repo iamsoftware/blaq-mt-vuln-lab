@@ -1,183 +1,197 @@
-20-MIN YOUTUBE SCRIPT - Ep05: Wazuh + OpenVAS + Nuclei (Build -> Break -> Detect -> Harden)
+20-MIN YOUTUBE SCRIPT - Build -> Break -> Detect -> Harden (Ep05: Wazuh + OpenVAS + Nuclei for a homelab)
 
-Intro (0:00–0:45)
-- Opening hook: "In 2026, your home lab is your security perimeter. Today we build a small SOC with Wazuh, we scan with OpenVAS, and we fuzz with Nuclei. All in a contained homelab." 
-- Episode title slate: Ep05 — Wazuh + OpenVAS + Nuclei
-- Quick plan: Build a compact stack in Docker, Break some noisy hotspots safely, Detect with alerts, Harden to sleep at night.
+Intro (0:00-0:40)
+- Greet: "What’s up, everyone? This is blaqlabs, Ep05. Today we’re building a compact security monitoring and scanning stack in a homelab using Wazuh, OpenVAS, and Nuclei. No fluff, just actionable steps and real-world caveats for a senior engineer."
+- Objective: "Create a reproducible lab: detect, verify, and harden vulnerabilities using a tight triad. Build fast, break safely, detect effectively, harden relentlessly."
+- Scope note: "All commands assume a Debian/Ubuntu-like host and root or sudo access. Replace distro-specific parts as needed."
+- Quick roadmap: Build the stack, Break a sane misconfiguration, Detect with centralized logging and scan results, Harden the environment.
 
-Part 1: Build (0:45–6:00)
-- Goal: Stand up a compact, reproducible stack for log collection, asset discovery, and vulnerability scanning.
-- Assumptions:
-  - Host: Linux (Ubuntu/Duster) with docker and docker-compose installed
-  - Networks: 172.20.0.0/16 for services; host network for some scans if needed
-- Prereqs (commands):
+PART 1: Build (0:40-7:30)
+Goal: Get Wazuh manager + agent, OpenVAS (greenbone) scanner, and Nuclei in a cohesive lab, with minimal friction.
+
+A. Prepare the host
+- Update and install essentials
   - sudo apt-get update && sudo apt-get upgrade -y
-  - sudo apt-get install -y docker.io docker-compose curl wget unzip
-  - sudo systemctl enable --now docker
-- Docker-compose (example) — create docker-compose.yml (content snippet):
-  - Explain that you’ll use Wazuh, Elasticsearch, OpenVAS (GVM), and Nuclei.
-  - Provide a minimal docker-compose snippet (without full YAML to keep it concise; you’ll paste full in repo):
-  - Key services: wazuh-manager, wazuh-agent, elasticsearch, kibana, gvm (OpenVAS), nuclei (or run nuclei in a container)
-- Commands to write and run:
-  - cat > docker-compose.yml << 'YAML'
-    version: "3.8"
-    services:
-      wazuh-manager:
-        image: wazuh/wazuh:4.3.10
-        environment:
-          - MANAGER=true
-        ports:
-          - "1514:1514/udp"
-          - "55000:55000"
-        networks:
-          - wazuh
-        restart: unless-stopped
-      elasticsearch:
-        image: docker.elastic.co/elasticsearch/elasticsearch:8.6.3
-        environment:
-          - discovery.type=single-node
-        ports:
-          - "9200:9200"
-        networks:
-          - wazuh
-        restart: unless-stopped
-      kibana:
-        image: docker.elastic.co/kibana/kibana:8.6.3
-        ports:
-          - "5601:5601"
-        networks:
-          - wazuh
-        depends_on:
-          - elasticsearch
-        restart: unless-stopped
-      gvm:
-        image: securecomms/gvm:21.4
-        ports:
-          - "9392:9392"
-          - "443:443"
-        networks:
-          - wazuh
-        restart: unless-stopped
-      nuclei:
-        image: projectdiscovery/nuclei
-        networks:
-          - wazuh
-        entrypoint: ["sh", "-c", "while true; do sleep 60; done"]
-        restart: unless-stopped
-    networks:
-      wazuh:
-        driver: bridge
-    YAML
-  - docker-compose up -d
-- Verification:
-  - docker ps
-  - curl -s http://localhost:5601/api/status  (Kibana status)
-  - curl -s http://localhost:9392  (GVM admin)
-- Observations:
-  - Wazuh should start ingesting logs; GVM should be ready to accept scans; Nuclei container ready for on-demand scans.
+  - sudo apt-get install -y curl gnupg lsb-release ca-certificates apt-transport-https
 
-Part 2: Break (6:00–11:30)
-- Objective: Simulate a controlled breach within the homelab to generate telemetry, without venturing into live external assets.
-- Safe practice: Use a deliberately vulnerable host inside the docker-compose network or a dedicated test VM.
-- Setup notes:
-  - Create a deliberately vulnerable test service, e.g., a container running an old version of web app.
-  - Example: a simple vulnerable nginx/JCVE app inside a separate container or VM.
-- Commands to create a degraded host for break simulation:
-  - docker run -d --name vuln-app --network wazuh -p 8080:80 httpd:2.4
-  - docker exec vuln-app bash -lc "apt-get update && apt-get install -y openssl && echo 'VULN' > /var/www/html/index.html"
-- Simulated break actions (safe, non-destructive):
-  - From attacker perspective (in-lab): use a controlled scan with OpenVAS (GVM) against vuln-app
-  - Commands to initiate a scan from GVM:
-    - Open GVM UI at http://localhost:9392
-    - Create target: 172.20.0.0/16 or specific 172.20.0.XX
-    - Use a conservative scan policy (Low/Medium)
-  - Nuclei quick tests (harmless templates):
-    - docker exec nuclei nuclei -u http://172.20.0.XX -t templates/common/ (adjust path to templates)
-- Break telemetry focus:
-  - Expect increased authentication failures in Wazuh alert rules if surrogate brute-force is attempted (keep to localhost)
-  - Look for vulnerability findings from OpenVAS (GVM) like outdated software, misconfig, default creds
-- Realistic but safe steps:
-  - Do not expose to internet; confine to docker network
-  - Document any suspicious patterns: repeated login failures, outdated services, weak config
+B. Deploy Wazuh (manager + agent)
+- Use the official Wazuh repo for Debian/Ubuntu
+  - curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | sudo gpg --dearmor -o /usr/share/keyrings/wazuh.gpg
+  - echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" | sudo tee /etc/apt/sources.list.d/wazuh.list > /dev/null
+  - sudo apt-get update
+  - sudo apt-get install -y wazuh-manager wazuh-api
+- Start and verify
+  - sudo systemctl enable --now wazuh-manager wazuh-api
+  - sudo tail -f /var/ossec/logs/ossec.log
+- Add a local agent (on same host or another VM)
+  - sudo apt-get install -y wazuh-agent
+  - sudo nano /var/ossec/etc/ossec.conf  # set the server to your manager IP
+  - sudo systemctl enable --now wazuh-agent
+  - On manager: /var/ossec/bin/manage_agents
+  - Add a new agent with name, key; then on agent: /var/ossec/bin/wazuh-control start
 
-Part 3: Detect (11:30–16:30)
-- Data sources:
-  - Wazuh: logs from OS, apps, auth, SSH, and OpenVAS/GVM findings
-  - OpenVAS/GVM: vulnerability reports, scan results
-  - Nuclei: HTTP/URL checks with templates
-- Detect workflow:
-  - Wazuh rule: detect failed SSH logins and configuration drift
-  - OpenVAS: collect scan results; create a rule to alert on critical/high findings
-  - Nuclei: alert on critical templates (CVE-level)
-- Commands (hands-on verification):
-  - Check Wazuh agent status:
-    - docker exec -it <agent> /usr/share/wazuh-manager/bin/ossec-control status
-  - Retrieve Wazuh alerts:
-    - curl -s -u user:pass http://localhost:5601/api/alerts/_search?size=50
-  - OpenVAS/GVM scan results:
-    - Use GVM UI to export results (PDF/CSV)
-  - Nuclei checks:
-    - docker exec nuclei nuclei -l /path/to/targets.txt -t templates/ -silent
-- Observations to capture:
-  - Time-stamped alerts for failed auth or misconfig
-  - CVEs detected and remediation suggestions
-  - Nuclei hits across your test host: note which templates hit and why
-- Response playbook (alerting side):
-  - If critical CVEs found: isolate affected container, rotate keys, patch, re-scan
-  - If suspicious login: enforce 2FA for access to admin interfaces; enable Wazuh rules for IP-based blocking
+C. Deploy OpenVAS (Greenbone Vulnerability Management)
+- Install dependencies and repository (assuming Debian/Ubuntu)
+  - sudo apt-get install -y software-properties-common
+  - sudo add-apt-repository -y ppa:mrazek/openvas
+  - sudo apt-get update
+  - sudo apt-get install -y openvas
+- Initialize and start
+  - sudo gvm-setup
+  - sudo gvm-check-setup
+  - sudo systemctl enable --now gvmd
+  - Note: The first run can take a while to fetch feeds; watch for "up-to-date" status
+- Access the admin console
+  - sudo runuser -u _gvm -- bash -c 'gvmd --user=admin --password=YourP@ssw0rd'
+  - Web UI at https://<host>:9392 with admin credentials
+- Optional: tailor scanners by creating targeted scan configs for your assets
 
-Part 4: Harden (16:30–20:00)
-- Harden goals:
-  - Reduce attack surface; improve logging fidelity; enforce policy
-- Harden steps:
-  - Network hardening:
-    - Restrict container intercommunication where not required
-    - Use docker-compose networks with least privilege
-  - Wazuh hardening:
-    - Enable agent->manager TLS; ensure TLS certs; restrict API access
-    - Enforce strong password policies for admin interfaces
-  - OpenVAS/GVM hardening:
-    - Use up-to-date feed; disable unauthenticated interfaces; limit scan scope
-  - Nuclei hardening:
-    - Use allowlists for templates; disable dangerous templates in production
-- Commands to implement hardening:
-  - Edit docker-compose.yml to enable TLS for Wazuh:
-    - volumes:
-      - ./certs:/etc/ssl/certs
-      - ./wazuh-rules:/usr/share/wazuh/rules
-  - Regenerate certificates (example with OpenSSL):
-    - openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 -keyout cert.pem -out cert.pem
-  - Apply firewall rules (on host):
-    - sudo ufw allow 22,5601,9200,9392/tcp
-    - sudo ufw deny to any from 0.0.0.0/0 to 0.0.0.0/0
-- Validation:
-  - Verify TLS on Wazuh API
-  - Validate that only necessary ports are exposed
-  - Re-run OpenVAS/Nuclei scans to ensure no regression
-- Wrap-up:
-  - Summarize learnings: Wazuh for visibility, OpenVAS for risk posture, Nuclei for breadth checks
-  - Provide next steps for automation and CI integration
-- End screen CTA:
-  - Subscribe, join the BlaqLabs community, and check episode notes for repo links
+D. Deploy Nuclei (fast, focused scanning)
+- Install Nuclei
+  - curl -s https://raw.githubusercontent.com/projectdiscovery/nuclei/main/install.sh | bash
+  - sudo mv nuclei /usr/local/bin/
+- Run quick, useful templates
+  - nuclei -update-templates
+  - nuclei -l targets.txt -t cves/ -td  # example for CVE templates
+- Integrate with CI or local scripts
+  - Create a small script that runs: nuclei -l hosts.txt -t svt.yaml -o nuclei_results.json
 
-Notes
-- All commands assume a homelab with Docker and Docker-Compose installed and a safe, isolated network.
-- Adapt paths and versions to your environment; avoid exposing scan interfaces to the public internet.
+E. Wire it together
+- Centralize logs/events
+  - Wazuh: ensure ossec.conf points to the manager; enable syslog output for OpenVAS/Nuclei results
+  - Consider shipping OpenVAS/Nuclei outputs to Wazuh via logs or Syslog
+- Basic inventory
+  - Maintain a simple hosts.txt with IPs of lab assets
+- Basic automation
+  - cron jobs to run OpenVAS and Nuclei scans on a schedule and push results to a local directory or to Wazuh via log files
 
-3-MIN TEASER SCRIPT - Ep05: Wazuh + OpenVAS + Nuclei
+F. Validation quick checks
+- Verify Wazuh status:
+  - systemctl status wazuh-manager wazuh-api wazuh-agent
+- Verify OpenVAS status:
+  - systemctl status gvmd greenbone-scan-manager ospd-openvas
+- Verify Nuclei version:
+  - nuclei -version
+- Quick scan sanity:
+  - OpenVAS: Run a minimal scan against 127.0.0.1 or a known internal host
+  - Nuclei: nuclei -l targets.txt -t http-* -o nuclei_scan.txt
+- Check logs for ingestion:
+  - tail -f /var/ossec/logs/ossec.log
+  - tail -f /var/log/gvm/gsad.log
+  - tail -f nuclei_scan.txt
 
-- Hook (0:00–0:05): "Your home lab is a target. Today we build a tiny SOC with Wazuh, OpenVAS, and Nuclei—in under 3 minutes."
-- Quick promise (0:05–0:45): "We’ll build, break safely, detect in real time, and harden the stack so you sleep at night."
-- Fast cuts: show docker-compose snippet, a quick grep of alerts, a scan starting in GVM, a nuclei hit
-- Call-to-action (0:45–1:00): "Full episode on blaqlabs"
+PART 2: Break (7:30-12:30)
+Goal: Simulate misconfigurations and ephemeral breakage, then demonstrate how to recover and validate.
 
-Full teaser (UI cue for visuals)
-- Scene 1: terminal shows docker-compose up -d
-- Scene 2: a simulated alert pops in Kibana
-- Scene 3: a GVM scan progress bar completes
-- Scene 4: hardened config saved, warning-free indicator
-- End card: "Full episode on blaqlabs"
+A. Break 1 — misconfigured Wazuh agent
+- Induce: corrupt the ossec.conf on an agent or disable the agent
+  - sudo sed -i 's/.*server.*/# misconfiguration: no server/' /var/ossec/etc/ossec.conf
+  - sudo systemctl restart wazuh-agent
+- Observe: Wazuh manager shows disconnected agent; logs show connection errors
+  - tail -f /var/ossec/logs/ossec.log
 
-LINKEDIN DRAFT - Ep05 takeaway
+B. Break 2 — OpenVAS feed outage
+- Induce: disable gvm-feed-sync or network egress
+  - systemctl stop greenbone-feed-sync
+  - Change DNS or block outbound to feed servers (iptables -A OUTPUT -d feed.server -j REJECT)
+- Observe: gvmd may report feed update failures; scans timeout
 
-- One lesson from Ep05: Co-locating Wazuh, OpenVAS (GVM), and Nuclei in a controlled homelab gives you end-to-end visibility: logs, vulnerabilities, and web-fortex checks all in one stack. The key is safe, contained testing and consistent hardening—don’t forget TLS, least privilege, and targeted scans. Full episode details in the BlaqLabs repo.
+C. Break 3 — Nuclei mis-scan config
+- Induce: point to an invalid template or mis-specified target
+  - nuclei -l targets.txt -t non-existent-template.yaml
+- Observe: non-zero exit codes; log shows missing template error
+
+D. Recovery steps (safe, guided)
+- Wazuh agent: restore ossec.conf to correct server, then restart
+  - sudo systemctl restart wazuh-agent
+- OpenVAS: re-enable feeds and ensure gvmd is healthy
+  - systemctl start greenbone-feed-sync
+  - gvmd --update --quiet
+- Nuclei: re-run with valid templates and targets
+  - nuclei -update-templates
+  - nuclei -l targets.txt -t httpx.yaml -o nuclei_recovered.json
+
+E. Validation after recovery
+- Check agent status: sudo systemctl status wazuh-agent; Wazuh dashboard shows connected agents
+- Check OpenVAS: ensure feeds are up, run a quick scan to confirm results appear
+- Check Nuclei: ensure templates load, scan completes successfully
+- Confirm centralized visibility: the Wazuh console shows events from hosts, OpenVAS results show up in the console if integrated, and nuclei outputs are captured
+
+PART 3: Detect (12:30-17:30)
+Goal: Demonstrate detection workflows and data flow across Wazuh, OpenVAS, and Nuclei.
+
+A. Wazuh detection
+- Show agent-generated alerts for failed login attempts, misconfig
+  - Go to Wazuh dashboard: Alerts -> Decoders -> look for syslog or agent errors
+- Demonstrate a rule for failed SSH
+  - If using default rules, show how to search:
+    - wazuh-sec-api query 'security: sshd:authentication failure'
+- Show how to create a custom rule (high-level)
+  - Rule: IF event.category == "authentication" AND event.src_ip != "127.0.0.1" THEN set priority 7 and alert
+
+B. OpenVAS results
+- Explain how OpenVAS reports high/severe vulnerabilities
+- Demonstrate exporting a report
+  - In OpenVAS/GVM: Export as XML/HTML and import into Wazuh or a SIEM light integration
+- Show how to map findings to remediation tasks (owner, asset, severity)
+
+C. Nuclei findings
+- Demonstrate running a targeted nuclei test against a host
+  - nuclei -l hosts.txt -t http-default-favicon.yaml
+- Explain how to triage findings: host context, path exposure, misconfig exposure
+- Tie to Wazuh by shipping a simple finding annotation (e.g., create a custom log entry when a nuclei result hits a threshold)
+
+D. Centralized workflow demo
+- Show a live summary screen (or mock) where:
+  - Wazuh alerts show new issues
+  - OpenVAS provides high-severity failures
+  - Nuclei returns fast, actionable endpoints
+- Actionable triage: assign owners, create tickets, and schedule remediation
+
+PART 4: Harden (17:30-20:00)
+Goal: Harden lab posture, reduce exposure, and improve future detection fidelity.
+
+A. Wazuh hardening
+- Enforce agent-client mutual TLS (use certificates rather than plain agent-key)
+- Enable tamper protection and log integrity monitoring
+- Harden manager: limit API access, enforce strong auth, rotate keys
+
+B. OpenVAS hardening
+- Run scans with least privilege, restrict network access to the scanner
+- Disable unnecessary scan types, enable only necessary feeds
+- Regularly update feed data; schedule periodic re-checks
+
+C. Nuclei hardening
+- Use scoped templates, avoid broad ultra-wide scans in production-like labs
+- Use rate limiting and request delays to avoid overloading internal services
+- Validate results to prevent notification fatigue (e.g., suppress duplicates)
+
+D. Network and host hardening
+- Apply host-based firewall rules: allow only essential ports (SSH, web UI, scanner communication)
+- Ensure SSH hardening: disable password login, enforce key-based auth
+- Regular patching cadence: schedule OS and software updates; test in a staging lane first
+
+E. Final validation and wrap-up
+- Re-run a small, representative set of scans
+- Confirm Wazuh alerts align with actual risks observed in OpenVAS/Nuclei
+- Confirm dashboards show accurate, timely data after hardening
+- Close with recommended next steps: add asset inventory, automate weekly scans, and tune rules
+
+Closing (20:00-20:30)
+- Quick recap of Build, Break, Detect, Harden
+- Call to action: comments with lab asset lists, favorite templates, and hardening tips
+
+3-MIN TEASER SCRIPT - Same topic, punchy, hook in first 5 seconds, ends with "Full episode on blaqlabs"
+
+- Hook (0-0:05): "If your homelab can’t prove its own security, you’re building on sand."
+- Build quick punch (0:05-1:20): "Today we stack Wazuh, OpenVAS, and Nuclei in a tight loop: deploy, validate, and prove you can detect, break, and harden in one sitting. We’re talking quick lab setup, sane defaults, and real commands you can copy-paste."
+- Core value (1:20-2:40): "You’ll see how a misconfig in an agent is caught by Wazuh, how OpenVAS surfaces critical flaws, and how Nuclei provides fast, focused checks—then we harden the stack to resist churn."
+- CTA (2:40-3:00): "If you want the full depth, tune in for Ep05. Full episode on blaqlabs"
+
+Note: The teaser emphasizes urgency and concrete outcomes, with a crisp, punchy flow, and ends with the requested line.
+
+LINKEDIN DRAFT - I will post this manually. Short, human, 1 lesson from the episode.
+
+One lesson from Ep05: Integrating Wazuh, OpenVAS, and Nuclei in a homelab turns vulnerability scanning from noisy alerts into actionable risk intelligence. When you centralize findings, correlate agent events, and harden the stack, you move from reacting to threats to proactively reducing your attack surface.
+
+If you’d like, I can format these into a downloadable script outline or provide a starter docker-compose snippet to bootstrap Wazuh/OpenVAS/Nuclei in a containerized lab.
